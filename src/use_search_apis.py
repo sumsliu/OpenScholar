@@ -16,10 +16,20 @@ import argparse
 import pandas as pd
 from xml.etree import ElementTree as ET
 import os
+import sys
+from pathlib import Path
 
-S2_API_KEY=os.environ["S2_API_KEY"]
-# YOUR_API_KEY = os.environ["YOUR_API_KEY"]
-PES2O_INDEX_URL="YOUR_PES2O_INDEX_URL"
+for _parent in Path(__file__).resolve().parents:
+    _candidate = _parent / "tools" / "literature_manager" / "src"
+    if _candidate.exists():
+        sys.path.insert(0, str(_candidate))
+        break
+
+from literature_manager.provider_http import AcademicHTTPClient
+
+S2_API_KEY=os.getenv("S2_API_KEY") or os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+_SEMANTIC_HTTP = AcademicHTTPClient()
+PES2O_INDEX_URL = os.getenv("PES2O_INDEX_URL", "")
 
 keyword_extraction_prompt = """
 Suggest semantic scholar search APIs to retrieve relevant papers to answer the following question related to the most recent NLP research. The search queries must be short, and commma separated. Here's an example. I'll show one example and the test instance you should suggest the search queries. \n
@@ -34,23 +44,6 @@ Question: {question}\n
 Search queries:
 """
 
-def get_paper_data(paper_id):
-    url = 'https://api.semanticscholar.org/graph/v1/paper/CorpusID:' + paper_id
-    # Define which details about the paper you would like to receive in the response
-    paper_data_query_params = {'fields': 'title,year,abstract,url,authors.name,citationCount,year,openAccessPdf'}
-    # Send the API request and store the response in a variable
-    api_key = S2_API_KEY
-    headers = {'x-api-key': api_key}
-    try:
-        response = requests.get(url, params=paper_data_query_params, headers=headers)
-        # time.sleep(0.1)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except:
-        return None
-
 def is_integer_string(s):
     return s.isdigit()
 
@@ -60,19 +53,14 @@ def get_paper_data(paper_id):
         url = 'https://api.semanticscholar.org/graph/v1/paper/' + paper_id
     else:
         url = 'https://api.semanticscholar.org/graph/v1/paper/CorpusID:' + paper_id
-    # Define which details about the paper you would like to receive in the response
     paper_data_query_params = {'fields': 'title,year,abstract,url,authors.name,citationCount,year,openAccessPdf'}
-    # Send the API request and store the response in a variable
-    api_key = S2_API_KEY
-    headers = {'x-api-key': api_key}
     try:
-        response = requests.get(url, params=paper_data_query_params, headers=headers)
-        # time.sleep(0.1)
+        response = _SEMANTIC_HTTP.get("semantic", url, params=paper_data_query_params)
         if response.status_code == 200:
             return response.json()
         else:
             return None
-    except:
+    except Exception:
         return None
 
 
@@ -97,12 +85,12 @@ def search_paper_via_query(query, max_paper_num=10):
     if "Search queries: " in query:
         query = query.split("Search queries: ")[1]
     query_params = {'query': query, 'limit': max_paper_num, "minCitationCount": 10, "sort": "citationCount:desc", 'fields': 'title,year,abstract,authors.name,citationCount,year,url,externalIds'}
-    api_key = S2_API_KEY
-    # Define headers with API key
-    headers = {'x-api-key': api_key}
     # Send the API request
-    response = requests.get('https://api.semanticscholar.org/graph/v1/paper/search', params=query_params, headers=headers)
-    time.sleep(0.5)
+    response = _SEMANTIC_HTTP.get(
+        "semantic",
+        "https://api.semanticscholar.org/graph/v1/paper/search",
+        params=query_params,
+    )
 
     if response.status_code == 200:
         response_data = response.json()
@@ -120,12 +108,13 @@ def search_paper_via_query(query, max_paper_num=10):
 
 def search_paper_via_title(title):
     query_params = {'query': title, 'fields': 'title,year,abstract,authors.name,citationCount,year,url,externalIds,corpusId'}
-    api_key = S2_API_KEY
-    headers = {'x-api-key': api_key}
     # Send the API request
     try:
-        response = requests.get('https://api.semanticscholar.org/graph/v1/paper/search/match', params=query_params, headers=headers)
-        time.sleep(0.2)
+        response = _SEMANTIC_HTTP.get(
+            "semantic",
+            "https://api.semanticscholar.org/graph/v1/paper/search/match",
+            params=query_params,
+        )
         # Check response status
         if response.status_code == 200:
             response_data = response.json()
@@ -164,43 +153,51 @@ def search_semantic_scholar(question, client, model_name):
         
     final_paper_list = []        
     for paper_id in paper_list:
-        final_paper_list.append({"semantic_scholar_id": paper_id, "type": "ss_abstract", "year": paper_list[paper_id]["title"], "authors": paper_list[paper_id]["authors"], "title": paper_list[paper_id]["title"], "text": paper_list[paper_id]["text"], "url": paper_list[paper_id]["url"], "citation_counts": paper_list[paper_id]["citationCount"], "abstract": paper_list[paper_id]["abstract"]})
-        if paper_list[paper_id]["externalIds"] is not None and "ArXiv" in paper_list[paper_id]["externalIds"]:
-            passages = retrieve_passages_single_paper(paper_list[paper_id]["externalIds"]["ArXiv"])
+        paper = paper_list[paper_id]
+        entry_base = {
+            "semantic_scholar_id": paper_id,
+            "type": "ss_abstract",
+            "year": paper.get("year", ""),
+            "authors": paper["authors"],
+            "title": paper["title"],
+            "url": paper["url"],
+            "citation_counts": paper["citationCount"],
+            "abstract": paper["abstract"],
+        }
+        final_paper_list.append({**entry_base, "text": paper["text"]})
+        if paper.get("externalIds") is not None and "ArXiv" in paper["externalIds"]:
+            passages = retrieve_passages_single_paper(paper["externalIds"]["ArXiv"])
             for p in passages:
-                final_paper_list.append({"semantic_scholar_id": paper_id, "type": "ss_abstract", "year": paper_list[paper_id]["title"], "authors": paper_list[paper_id]["authors"], "title": paper_list[paper_id]["title"], "text": p, "url": paper_list[paper_id]["url"], "citation_counts": paper_list[paper_id]["citationCount"], "abstract": paper_list[paper_id]["abstract"]})
+                final_paper_list.append({**entry_base, "text": p})
     return final_paper_list, new_keywords
 
 def batch_paper_data(arxiv_ids):
-    api_key = S2_API_KEY
-    headers = {'x-api-key': api_key}
-    r = requests.post(
+    r = _SEMANTIC_HTTP.post(
+        "semantic",
         'https://api.semanticscholar.org/graph/v1/paper/batch',
         params={'fields': 'referenceCount,citationCount,title,url,publicationDate,abstract'},
-        json={"ids": ['ARXIV:{0}'.format(id) for id in arxiv_ids]}, headers=headers)
-    time.sleep(1)
+        json={"ids": ['ARXIV:{0}'.format(id) for id in arxiv_ids]},
+    )
     response_data = r.json()
     return {id: data for id, data in zip(arxiv_ids, response_data)}
 
 def batch_paper_data_pubmed(pubmed_ids):
-    api_key = S2_API_KEY
-    headers = {'x-api-key': api_key}
-    r = requests.post(
+    r = _SEMANTIC_HTTP.post(
+        "semantic",
         'https://api.semanticscholar.org/graph/v1/paper/batch',
         params={'fields': 'referenceCount,citationCount,title,url,publicationDate,abstract'},
-        json={"ids": ['PMID:{0}'.format(id) for id in pubmed_ids]}, headers=headers)
-    time.sleep(0.1)
+        json={"ids": ['PMID:{0}'.format(id) for id in pubmed_ids]},
+    )
     response_data = r.json()
     return {id: data for id, data in zip(pubmed_ids, response_data)}
 
 def batch_paper_data_SS_ID(paper_ids):
-    api_key = S2_API_KEY
-    headers = {'x-api-key': api_key}
-    r = requests.post(
+    r = _SEMANTIC_HTTP.post(
+        "semantic",
         'https://api.semanticscholar.org/graph/v1/paper/batch',
         params={'fields': 'referenceCount,citationCount,title,url,publicationDate,abstract,year,authors.name'},
-        json={"ids": ["CorpusId:{0}".format(id) for id in paper_ids]}, headers=headers)
-    time.sleep(0.1)
+        json={"ids": ["CorpusId:{0}".format(id) for id in paper_ids]},
+    )
     response_data = r.json()
     return {id: data for id, data in zip(paper_ids, response_data)}
 
@@ -277,6 +274,13 @@ def get_pubmed_abstract_title(pmid):
     
     
 def search_google_non_restricted(query):
+    try:
+        from googlesearch import search
+    except ImportError:
+        raise ImportError(
+            "google search requires 'googlesearch-python' package. "
+            "Install via: pip install googlesearch-python"
+        )
     search_results = search("site: https://arxiv.org/ OR https://pubmed.ncbi.nlm.nih.gov/ {}".format(query), advanced=True)
     arxiv_ids = []
     pubmed_ids = []
@@ -326,7 +330,10 @@ def search_google_non_restricted(query):
 
 
 def search_youcom_non_restricted(query):
-    headers = {"X-API-Key": YOUR_API_KEY}
+    api_key = os.getenv("YOU_API_KEY", "")
+    if not api_key:
+        raise ValueError("YOU_API_KEY environment variable not set for You.com search")
+    headers = {"X-API-Key": api_key}
     query = "site: https://arxiv.org/ OR https://pubmed.ncbi.nlm.nih.gov/ {}".format(query)
     params = {"query": query, "num_web_results": 20}
     search_results = requests.get(
